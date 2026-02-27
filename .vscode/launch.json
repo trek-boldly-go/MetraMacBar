@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:metra-tracker}",
+            "name": "Debug MetraTracker",
+            "target": "MetraTracker",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug MetraTracker"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:metra-tracker}",
+            "name": "Release MetraTracker",
+            "target": "MetraTracker",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release MetraTracker"
+        }
+    ]
+}

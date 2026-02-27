@@ -13,7 +13,7 @@ Built for BNSF line, Naperville → Chicago (inbound) by default.
 ## Quick Start
 
 ```bash
-git clone https://github.com/yourusername/MetraMacBar.git
+git clone https://github.com/trek-boldly-go/MetraMacBar.git
 cd MetraMacBar
 make run
 ```
@@ -58,4 +58,3 @@ Currently hardcoded to BNSF line, Naperville station, inbound (direction 1). To 
 ## License
 
 MIT — see [LICENSE](LICENSE).
-# MetraMacBar
