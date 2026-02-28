@@ -1,10 +1,10 @@
 import AppKit
 import SwiftUI
 
-final class MenuBarController: NSObject {
+final class MenuBarController: NSObject, NSWindowDelegate {
     private var statusItem: NSStatusItem
     private var popover: NSPopover
-    private var setupPanel: NSPanel?
+    private var settingsPanel: NSWindow?
     private var refreshTimer: Timer?
     private let metraService = MetraService()
     private let scheduleService = GTFSScheduleService()
@@ -15,10 +15,8 @@ final class MenuBarController: NSObject {
     init(appState: AppState) {
         self.appState = appState
 
-        // Status item
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
-        // Popover
         popover = NSPopover()
         popover.behavior = .transient
         popover.animates = true
@@ -36,7 +34,6 @@ final class MenuBarController: NSObject {
 
     private func configureButton() {
         guard let button = statusItem.button else { return }
-        button.title = "BNSF"
         button.image = NSImage(systemSymbolName: "tram.fill", accessibilityDescription: "Metra")
         button.image?.isTemplate = true
         button.imagePosition = .imageLeft
@@ -49,7 +46,8 @@ final class MenuBarController: NSObject {
         let content = TrainListView(
             appState: appState,
             onRefresh: { [weak self] in self?.refresh() },
-            onSetup: { [weak self] in self?.showSetup() }
+            onSetup: { [weak self] in self?.showSettings() },
+            onCycleSlot: { [weak self] in self?.cycleSlot() }
         )
         let hostingController = NSHostingController(rootView: content)
         popover.contentViewController = hostingController
@@ -74,10 +72,9 @@ final class MenuBarController: NSObject {
         menu.addItem(withTitle: "Refresh", action: #selector(refresh), keyEquivalent: "r")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Metra Tracker", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        // Temporarily set the menu so AppKit positions it correctly under the status item
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
-        statusItem.menu = nil   // clear so left-click still opens the popover
+        statusItem.menu = nil
     }
 
     private func openPopover() {
@@ -86,7 +83,6 @@ final class MenuBarController: NSObject {
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         NSApp.activate(ignoringOtherApps: true)
 
-        // Close popover when clicking outside
         eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             self?.closePopover()
         }
@@ -100,32 +96,67 @@ final class MenuBarController: NSObject {
         }
     }
 
-    // MARK: - Setup Panel
+    // MARK: - Settings Panel
 
-    func showSetup() {
+    func showSettings() {
         closePopover()
 
-        let setupView = SetupView(appState: appState) { [weak self] in
-            self?.setupPanel?.close()
-            self?.setupPanel = nil
+        // If already open, just bring it forward
+        if let existing = settingsPanel {
+            existing.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let settingsView = SettingsView(appState: appState) { [weak self] in
+            self?.settingsPanel?.close()
+            self?.scheduleService.invalidate()
             self?.refresh()
         }
 
-        let hostingController = NSHostingController(rootView: setupView)
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 180),
+        let hostingController = NSHostingController(rootView: settingsView)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 540),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        panel.title = "Metra Tracker Setup"
-        panel.contentViewController = hostingController
-        panel.isReleasedWhenClosed = false
-        panel.center()
-        panel.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        window.title = "Metra Tracker Settings"
+        window.contentViewController = hostingController
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.center()
 
-        setupPanel = panel
+        // Switch to .regular so the window activates the app and receives keyboard events
+        NSApp.setActivationPolicy(.regular)
+        window.makeKeyAndOrderFront(nil)
+        if #available(macOS 14.0, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+
+        settingsPanel = window
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        settingsPanel = nil
+        NSApp.setActivationPolicy(.accessory)
+    }
+
+    // MARK: - Slot Cycling
+
+    private func cycleSlot() {
+        let slots = appState.config.slots
+        guard slots.count > 1 else { return }
+        let currentId = appState.overrideSlotId ?? appState.config.activeSlot()?.id
+        let nextIndex: Int
+        if let ci = currentId, let i = slots.firstIndex(where: { $0.id == ci }) {
+            nextIndex = (i + 1) % slots.count
+        } else {
+            nextIndex = 0
+        }
+        appState.overrideSlotId = slots[nextIndex].id
+        refresh()
     }
 
     // MARK: - Refresh
@@ -143,40 +174,105 @@ final class MenuBarController: NSObject {
     }
 
     @objc func refresh() {
-        appState.isLoading = true
         let config = appState.config
+
+        // Detect time-based slot change → clear manual override so auto-switch takes effect
+        let autoSlot = config.activeSlot()
+        if autoSlot?.id != appState.lastAutoSlotId {
+            appState.lastAutoSlotId = autoSlot?.id
+            appState.overrideSlotId = nil
+        }
+
+        // Resolve the effective slot (manual override or time-based)
+        guard let slot = config.slots.first(where: { $0.id == appState.overrideSlotId }) ?? autoSlot else {
+            appState.departures = []
+            appState.errorMessage = "No route slots configured. Open Settings to add one."
+            return
+        }
+
+        appState.isLoading = true
 
         Task { @MainActor in
             defer { appState.isLoading = false }
 
             // 1. Try the real-time feed if we have a token
+            var rtTrains: [TrainDeparture] = []
             if let token = appState.apiToken {
                 do {
-                    let trains = try await metraService.fetchUpcomingTrains(token: token, config: config)
-                    appState.departures = trains
-                    appState.isRealTime = true
-                    appState.errorMessage = nil
-                    appState.lastUpdated = Date()
-                    updateMenuBarTitle(departures: trains)
-                    return
+                    rtTrains = try await metraService.fetchUpcomingTrains(
+                        token: token,
+                        lineId: config.lineId,
+                        stopId: slot.departureStopId,
+                        destinationStopId: slot.destinationStopId,
+                        directionId: slot.directionId,
+                        maxTrains: config.maxTrains
+                    )
+                    appState.rtError = nil
+                    // If RT returned a full list, use it directly — no static needed
+                    if rtTrains.count >= config.maxTrains {
+                        appState.departures = rtTrains
+                        appState.isRealTime = true
+                        appState.errorMessage = nil
+                        appState.lastUpdated = Date()
+                        updateMenuBarTitle(departures: rtTrains)
+                        return
+                    }
+                    // Partial RT list — fall through to fetch static for padding
                 } catch {
-                    // RT failed — note the reason and fall through to static
-                    appState.errorMessage = "Live data unavailable — showing scheduled times."
+                    appState.rtError = error.localizedDescription
+                    // fall through to static only
                 }
             }
 
-            // 2. Fall back to static GTFS schedule
+            // 2. Fetch static GTFS schedule (always needed when RT is partial or absent)
             do {
-                let trains = try await scheduleService.fetchUpcomingTrains(config: config)
-                appState.departures = trains
-                appState.isRealTime = false
+                let staticTrains = try await scheduleService.fetchUpcomingTrains(
+                    lineId: config.lineId,
+                    stopId: slot.departureStopId,
+                    destinationStopId: slot.destinationStopId,
+                    directionId: slot.directionId,
+                    maxTrains: config.maxTrains
+                )
+
+                if !rtTrains.isEmpty {
+                    // Merge: RT trains take priority; pad with static trains not already in RT
+                    let rtTripIds = Set(rtTrains.map { $0.tripId })
+                    let padding = staticTrains.filter { !rtTripIds.contains($0.tripId) }
+                    let merged = (rtTrains + padding)
+                        .sorted { $0.effectiveTime < $1.effectiveTime }
+                        .prefix(config.maxTrains)
+                        .map { $0 }
+                    appState.departures = merged
+                    appState.isRealTime = true   // we have live data for some trains
+                } else {
+                    // No live data — show static only
+                    appState.departures = staticTrains
+                    appState.isRealTime = false
+                }
+
+                appState.errorMessage = nil
                 appState.lastUpdated = Date()
-                // If no token at all, don't show an error — static data is expected
-                if appState.apiToken == nil { appState.errorMessage = nil }
-                updateMenuBarTitle(departures: trains)
+                updateMenuBarTitle(departures: appState.departures)
+
+                // Populate GTFS metadata for settings UI (best-effort, background)
+                populateGTFSMetadata(lineId: config.lineId)
             } catch {
                 appState.errorMessage = error.localizedDescription
                 updateMenuBarTitle(departures: appState.departures)
+            }
+        }
+    }
+
+    // MARK: - GTFS Metadata for Settings UI
+
+    private func populateGTFSMetadata(lineId: String) {
+        Task { @MainActor in
+            if let stops = try? await scheduleService.stopsForLine(lineId), !stops.isEmpty {
+                appState.lineStops[lineId] = stops
+            }
+            if appState.availableLines.isEmpty,
+               let lines = try? await scheduleService.availableLines(), !lines.isEmpty {
+                appState.availableLines = lines
             }
         }
     }

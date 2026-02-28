@@ -4,16 +4,25 @@ struct TrainListView: View {
     @ObservedObject var appState: AppState
     var onRefresh: () -> Void
     var onSetup: () -> Void
+    var onCycleSlot: () -> Void
+
+    // Resolve effective slot: manual override → time-based → first slot
+    private var activeSlot: RouteSlot? {
+        appState.config.slots.first(where: { $0.id == appState.overrideSlotId })
+            ?? appState.config.activeSlot()
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             headerView
             Divider()
             contentView
+                .frame(maxHeight: .infinity, alignment: .top)
             Divider()
             footerView
         }
         .frame(width: 300)
+        .frame(minHeight: 360)
         .background(Color(NSColor.windowBackgroundColor))
     }
 
@@ -23,7 +32,7 @@ struct TrainListView: View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text("BNSF — Inbound")
+                    Text(headerTitle)
                         .font(.system(size: 13, weight: .semibold))
                     if !appState.isRealTime {
                         Text("SCHEDULED")
@@ -35,11 +44,19 @@ struct TrainListView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 3))
                     }
                 }
-                Text("from \(appState.config.stopName) → Chicago")
+                Text(headerSubtitle)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
             Spacer()
+            if appState.config.slots.count > 1 {
+                Button(action: onCycleSlot) {
+                    Image(systemName: "arrow.left.arrow.right")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Switch route")
+            }
             Button(action: onSetup) {
                 Image(systemName: "gearshape")
                     .foregroundColor(.secondary)
@@ -49,6 +66,25 @@ struct TrainListView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+
+    private var headerTitle: String {
+        let line = appState.config.lineId
+        let direction = activeSlot?.directionId == 0 ? "Outbound" : "Inbound"
+        return "\(line) — \(direction)"
+    }
+
+    private var headerSubtitle: String {
+        guard let slot = activeSlot else { return "No route configured" }
+        if slot.directionId == 1 {
+            return "from \(slot.departureStopName) → \(slot.destinationStopName ?? "Chicago")"
+        } else {
+            if let dest = slot.destinationStopName {
+                return "from \(slot.departureStopName) → \(dest)"
+            } else {
+                return "Outbound from \(slot.departureStopName)"
+            }
+        }
     }
 
     // MARK: - Content
@@ -91,6 +127,14 @@ struct TrainListView: View {
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
+            } else if appState.apiToken != nil && appState.rtError != nil {
+                HStack(spacing: 3) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.caption2)
+                    Text("Live unavailable")
+                }
+                .foregroundColor(.orange)
+                .help(appState.rtError ?? "Live data unavailable. Check your API token in Settings.")
             } else {
                 HStack(spacing: 3) {
                     Text("Scheduled")
@@ -98,7 +142,9 @@ struct TrainListView: View {
                         .font(.caption2)
                 }
                 .foregroundColor(.secondary)
-                .help("Showing static schedule times. Add an API token in Settings for live tracking.")
+                .help(appState.apiToken != nil
+                    ? "No trains currently active. Token ready. Showing static schedule."
+                    : "Showing static schedule times. Add an API token in Settings for live tracking.")
             }
             Spacer()
             Button(action: onRefresh) {
@@ -140,8 +186,16 @@ struct TrainRowView: View {
     var body: some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Train \(train.trainNumber)")
-                    .font(.system(size: 12, weight: .medium))
+                HStack(spacing: 4) {
+                    Text("Train \(train.trainNumber)")
+                        .font(.system(size: 12, weight: .medium))
+                    if train.isRealTime {
+                        Image(systemName: "dot.radiowaves.right")
+                            .font(.system(size: 9))
+                            .foregroundColor(.accentColor)
+                            .help("Live tracking")
+                    }
+                }
                 if hasDelay {
                     Text("+\(delayMinutes) min delay")
                         .font(.caption2)

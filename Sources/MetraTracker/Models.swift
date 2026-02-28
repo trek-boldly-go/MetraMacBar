@@ -1,58 +1,5 @@
+import Combine
 import Foundation
-
-// MARK: - GTFS-RT Feed (snake_case JSON from Metra API)
-
-struct FeedMessage: Decodable {
-    let header: FeedHeader
-    let entity: [FeedEntity]
-}
-
-struct FeedHeader: Decodable {
-    let gtfs_realtime_version: String?
-    let timestamp: String?
-    let incrementality: String?
-}
-
-struct FeedEntity: Decodable {
-    let id: String
-    let trip_update: TripUpdate?
-}
-
-struct TripUpdate: Decodable {
-    let trip: TripDescriptor
-    let stop_time_update: [StopTimeUpdate]?
-    let timestamp: String?
-    let delay: Int?
-    let vehicle: VehicleDescriptor?
-}
-
-struct TripDescriptor: Decodable {
-    let trip_id: String?
-    let route_id: String?
-    let direction_id: Int?
-    let start_date: String?
-    let start_time: String?
-    let schedule_relationship: String?
-}
-
-struct StopTimeUpdate: Decodable {
-    let stop_sequence: Int?
-    let stop_id: String?
-    let departure: StopTimeEvent?
-    let arrival: StopTimeEvent?
-    let schedule_relationship: String?
-}
-
-struct StopTimeEvent: Decodable {
-    let delay: Int?
-    let time: String?   // Unix timestamp as string
-    let uncertainty: Int?
-}
-
-struct VehicleDescriptor: Decodable {
-    let id: String?
-    let label: String?
-}
 
 // MARK: - Domain Model
 
@@ -62,6 +9,7 @@ struct TrainDeparture: Identifiable {
     let scheduledTime: Date
     let delaySeconds: Int
     let minutesUntil: Int
+    let isRealTime: Bool
 
     var effectiveTime: Date {
         scheduledTime.addingTimeInterval(TimeInterval(delaySeconds))
@@ -70,6 +18,7 @@ struct TrainDeparture: Identifiable {
     var formattedDepartureTime: String {
         let formatter = DateFormatter()
         formatter.dateFormat = "h:mm a"
+        formatter.timeZone = .centralTime  // always display in Central regardless of laptop TZ
         return formatter.string(from: effectiveTime)
     }
 
@@ -95,14 +44,25 @@ struct TrainDeparture: Identifiable {
 
 // MARK: - App State (shared observable)
 
-import Combine
-
 final class AppState: ObservableObject {
     @Published var departures: [TrainDeparture] = []
     @Published var lastUpdated: Date?
     @Published var errorMessage: String?
     @Published var isLoading: Bool = false
-    @Published var isRealTime: Bool = true   // false = showing static schedule
+    @Published var isRealTime: Bool = true  // false = showing static schedule
     @Published var apiToken: String?
     @Published var config: RouteConfig = ConfigStore.load()
+
+    // Slot override: set when user manually cycles via ⇄; cleared on auto-slot change
+    @Published var overrideSlotId: UUID? = nil
+    // Tracks the last time-based slot to detect when auto-selection changes
+    @Published var lastAutoSlotId: UUID? = nil
+
+    @Published var rtError: String? = nil  // non-nil = token present but RT fetch failed
+
+    // GTFS-derived data for settings UI (populated after first GTFS load)
+    @Published var lineStops: [String: [(id: String, name: String)]] = [:]
+    @Published var inboundHeadsign: String? = nil
+    @Published var outboundHeadsign: String? = nil
+    @Published var availableLines: [(id: String, name: String)] = []
 }

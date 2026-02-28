@@ -28,7 +28,7 @@ final class MetraService {
         session = URLSession(configuration: config)
     }
 
-    func fetchUpcomingTrains(token: String, config: RouteConfig) async throws -> [TrainDeparture] {
+    func fetchUpcomingTrains(token: String, lineId: String, stopId: String, destinationStopId: String?, directionId: Int, maxTrains: Int) async throws -> [TrainDeparture] {
         guard var components = URLComponents(string: baseURL) else {
             throw MetraError.badURL
         }
@@ -36,7 +36,6 @@ final class MetraService {
         guard let url = components.url else { throw MetraError.badURL }
 
         var request = URLRequest(url: url)
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("MetraTracker/1.0", forHTTPHeaderField: "User-Agent")
 
         let (data, response) = try await session.data(for: request)
@@ -45,62 +44,70 @@ final class MetraService {
             throw MetraError.httpError(http.statusCode)
         }
 
-        let feed: FeedMessage
+        let entities: [RTEntity]
         do {
-            feed = try JSONDecoder().decode(FeedMessage.self, from: data)
+            entities = try parseGTFSRTFeed(data)
         } catch {
             throw MetraError.decodingError(error)
         }
 
-        return parseTrains(from: feed, config: config)
+        return parseTrains(from: entities, lineId: lineId, stopId: stopId, destinationStopId: destinationStopId, directionId: directionId, maxTrains: maxTrains)
     }
 
-    private func parseTrains(from feed: FeedMessage, config: RouteConfig) -> [TrainDeparture] {
+    private func parseTrains(from entities: [RTEntity], lineId: String, stopId: String, destinationStopId: String?, directionId: Int, maxTrains: Int) -> [TrainDeparture] {
         let now = Date()
 
         var departures: [TrainDeparture] = []
 
-        for entity in feed.entity {
-            guard let tripUpdate = entity.trip_update else { continue }
+        for entity in entities {
+            guard let tripUpdate = entity.tripUpdate else { continue }
             let trip = tripUpdate.trip
 
             // Filter by route
-            if let routeId = trip.route_id, routeId != config.lineId { continue }
+            if let routeId = trip.routeId, routeId != lineId { continue }
 
-            // Filter by direction if present
-            if let dirId = trip.direction_id, dirId != config.directionId { continue }
+            // When destination is set, direction is implied by stop order; skip directionId filter
+            if destinationStopId == nil {
+                if let dirId = trip.directionId, dirId != directionId { continue }
+            }
 
             // Find the stop time update for our station
+            let updates = tripUpdate.stopTimes
             guard
-                let updates = tripUpdate.stop_time_update,
-                let stopUpdate = updates.first(where: { $0.stop_id == config.stopId }),
-                let departure = stopUpdate.departure,
-                let timeStr = departure.time,
-                let timeInterval = TimeInterval(timeStr)
+                let depIdx = updates.firstIndex(where: { $0.stopId == stopId }),
+                let event = updates[depIdx].departure ?? updates[depIdx].arrival,
+                let timeValue = event.time
             else { continue }
 
-            let scheduledTime = Date(timeIntervalSince1970: timeInterval)
-            let delaySeconds = departure.delay ?? 0
+            // If a destination stop is configured, require it appears after the departure stop
+            if let destId = destinationStopId {
+                guard let destIdx = updates.firstIndex(where: { $0.stopId == destId }),
+                    destIdx > depIdx else { continue }
+            }
+
+            let scheduledTime = Date(timeIntervalSince1970: TimeInterval(timeValue))
+            let delaySeconds = event.delay ?? 0
             let effectiveTime = scheduledTime.addingTimeInterval(TimeInterval(delaySeconds))
 
             // Skip trains already departed (with a small buffer)
             guard effectiveTime > now.addingTimeInterval(-60) else { continue }
 
             let minutesUntil = max(0, Int(effectiveTime.timeIntervalSince(now) / 60))
-            let tripId = trip.trip_id ?? entity.id
+            let tripId = trip.tripId ?? entity.id
 
             departures.append(TrainDeparture(
                 id: entity.id,
                 tripId: tripId,
                 scheduledTime: scheduledTime,
                 delaySeconds: delaySeconds,
-                minutesUntil: minutesUntil
+                minutesUntil: minutesUntil,
+                isRealTime: true
             ))
         }
 
         return departures
             .sorted { $0.effectiveTime < $1.effectiveTime }
-            .prefix(config.maxTrains)
+            .prefix(maxTrains)
             .map { $0 }
     }
 }

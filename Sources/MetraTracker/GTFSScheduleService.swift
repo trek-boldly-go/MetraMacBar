@@ -26,8 +26,8 @@ enum GTFSError: LocalizedError {
 
 private struct GTFSServiceCalendar {
     let monday, tuesday, wednesday, thursday, friday, saturday, sunday: Bool
-    let startDate: String   // YYYYMMDD
-    let endDate: String     // YYYYMMDD
+    let startDate: String  // YYYYMMDD
+    let endDate: String  // YYYYMMDD
 }
 
 // MARK: - Service
@@ -36,7 +36,8 @@ final class GTFSScheduleService {
 
     // ~/Library/Application Support/com.metratracker/gtfs/
     private static let cacheDir: URL = {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first!
         let dir = base.appendingPathComponent("com.metratracker/gtfs", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
@@ -58,14 +59,43 @@ final class GTFSScheduleService {
     private var services: [String: GTFSServiceCalendar] = [:]
     // calendarExceptions[service_id] = [(date "YYYYMMDD", exceptionType 1/2)]
     private var calendarExceptions: [String: [(date: String, type: Int)]] = [:]
+    // stops[stop_id] = stop_name
+    private var stops: [String: String] = [:]
+    // lineStops[route_id] = set of stop_ids that appear on that line
+    private var lineStops: [String: Set<String>] = [:]
+    // routes sorted by name: [(id, name)]
+    private var parsedRoutes: [(id: String, name: String)] = []
 
     private var isLoaded = false
 
     // MARK: - Public API
 
-    func fetchUpcomingTrains(config: RouteConfig) async throws -> [TrainDeparture] {
+    func fetchUpcomingTrains(lineId: String, stopId: String, destinationStopId: String?, directionId: Int, maxTrains: Int)
+        async throws -> [TrainDeparture]
+    {
         try await ensureLoaded()
-        return computeDepartures(config: config)
+        return computeDepartures(
+            lineId: lineId, stopId: stopId, destinationStopId: destinationStopId,
+            directionId: directionId, maxTrains: maxTrains)
+    }
+
+    /// Returns stops that serve `lineId`, sorted alphabetically. Requires GTFS to be loaded.
+    func stopsForLine(_ lineId: String) async throws -> [(id: String, name: String)] {
+        try await ensureLoaded()
+        guard let ids = lineStops[lineId] else { return [] }
+        return
+            ids
+            .compactMap { id -> (id: String, name: String)? in
+                guard let name = stops[id] else { return nil }
+                return (id: id, name: name)
+            }
+            .sorted { $0.name < $1.name }
+    }
+
+    /// Returns all lines from routes.txt, sorted by name.
+    func availableLines() async throws -> [(id: String, name: String)] {
+        try await ensureLoaded()
+        return parsedRoutes
     }
 
     // Call this when config changes so we re-filter on next fetch
@@ -82,24 +112,32 @@ final class GTFSScheduleService {
         isLoaded = true
     }
 
+    private static let neededFiles = [
+        "trips.txt", "stop_times.txt", "calendar.txt", "calendar_dates.txt", "stops.txt",
+        "routes.txt",
+    ]
+
     private func updateCacheIfNeeded() async throws {
-        let needed = ["trips.txt", "stop_times.txt", "calendar.txt", "calendar_dates.txt"]
+        let needed = Self.neededFiles
         // Require each file to exist AND be non-empty (guards against stale zero-byte files
         // left behind by a previous failed extraction)
         let allCached = needed.allSatisfy { filename in
             let url = Self.cacheDir.appendingPathComponent(filename)
             guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-                  let size = attrs[.size] as? Int else { return false }
+                let size = attrs[.size] as? Int
+            else { return false }
             return size > 0
         }
 
         do {
             let (data, _) = try await session.data(from: publishedURL)
-            let remote = String(data: data, encoding: .utf8)?
+            let remote =
+                String(data: data, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
             let localFile = Self.cacheDir.appendingPathComponent("published.txt")
-            let local = (try? String(contentsOf: localFile, encoding: .utf8))?
+            let local =
+                (try? String(contentsOf: localFile, encoding: .utf8))?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
             if !allCached || remote != local {
@@ -123,7 +161,7 @@ final class GTFSScheduleService {
         let zipPath = Self.cacheDir.appendingPathComponent("schedule.zip")
         try data.write(to: zipPath, options: .atomic)
 
-        let needed = ["trips.txt", "stop_times.txt", "calendar.txt", "calendar_dates.txt"]
+        let needed = Self.neededFiles
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
         // -j junks directory paths so files nested inside the ZIP land flat in cacheDir
@@ -139,7 +177,7 @@ final class GTFSScheduleService {
         for filename in needed {
             let url = Self.cacheDir.appendingPathComponent(filename)
             guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-                  let size = attrs[.size] as? Int, size > 0
+                let size = attrs[.size] as? Int, size > 0
             else { throw GTFSError.extractionFailed }
         }
 
@@ -157,11 +195,16 @@ final class GTFSScheduleService {
         stopTimes = [:]
         services = [:]
         calendarExceptions = [:]
+        stops = [:]
+        lineStops = [:]
+        parsedRoutes = []
 
+        try parseRoutes()
         try parseTrips()
         try parseCalendar()
         try parseCalendarDates()
-        try parseStopTimes()   // last — can filter against trips dict
+        try parseStops()
+        try parseStopTimes()  // last — can filter against trips dict and build lineStops
     }
 
     private func parseTrips() throws {
@@ -170,8 +213,8 @@ final class GTFSScheduleService {
         let (headers, rows) = splitCSV(content)
 
         guard let tripCol = headers.firstIndex(of: "trip_id"),
-              let routeCol = headers.firstIndex(of: "route_id"),
-              let serviceCol = headers.firstIndex(of: "service_id")
+            let routeCol = headers.firstIndex(of: "route_id"),
+            let serviceCol = headers.firstIndex(of: "service_id")
         else { throw GTFSError.missingColumns("trips.txt") }
         let dirCol = headers.firstIndex(of: "direction_id")
 
@@ -193,19 +236,20 @@ final class GTFSScheduleService {
         let (headers, rows) = splitCSV(content)
 
         guard let sidCol = headers.firstIndex(of: "service_id"),
-              let monCol = headers.firstIndex(of: "monday"),
-              let tueCol = headers.firstIndex(of: "tuesday"),
-              let wedCol = headers.firstIndex(of: "wednesday"),
-              let thuCol = headers.firstIndex(of: "thursday"),
-              let friCol = headers.firstIndex(of: "friday"),
-              let satCol = headers.firstIndex(of: "saturday"),
-              let sunCol = headers.firstIndex(of: "sunday"),
-              let startCol = headers.firstIndex(of: "start_date"),
-              let endCol = headers.firstIndex(of: "end_date")
+            let monCol = headers.firstIndex(of: "monday"),
+            let tueCol = headers.firstIndex(of: "tuesday"),
+            let wedCol = headers.firstIndex(of: "wednesday"),
+            let thuCol = headers.firstIndex(of: "thursday"),
+            let friCol = headers.firstIndex(of: "friday"),
+            let satCol = headers.firstIndex(of: "saturday"),
+            let sunCol = headers.firstIndex(of: "sunday"),
+            let startCol = headers.firstIndex(of: "start_date"),
+            let endCol = headers.firstIndex(of: "end_date")
         else { throw GTFSError.missingColumns("calendar.txt") }
 
         for row in rows {
-            let maxIdx = max(sidCol, monCol, tueCol, wedCol, thuCol, friCol, satCol, sunCol, startCol, endCol)
+            let maxIdx = max(
+                sidCol, monCol, tueCol, wedCol, thuCol, friCol, satCol, sunCol, startCol, endCol)
             guard row.count > maxIdx else { continue }
             let sid = row[sidCol]
             guard !sid.isEmpty else { continue }
@@ -229,8 +273,8 @@ final class GTFSScheduleService {
         let (headers, rows) = splitCSV(content)
 
         guard let sidCol = headers.firstIndex(of: "service_id"),
-              let dateCol = headers.firstIndex(of: "date"),
-              let typeCol = headers.firstIndex(of: "exception_type")
+            let dateCol = headers.firstIndex(of: "date"),
+            let typeCol = headers.firstIndex(of: "exception_type")
         else { throw GTFSError.missingColumns("calendar_dates.txt") }
 
         for row in rows {
@@ -238,6 +282,42 @@ final class GTFSScheduleService {
             let sid = row[sidCol]
             guard !sid.isEmpty, let exType = Int(row[typeCol]) else { continue }
             calendarExceptions[sid, default: []].append((date: row[dateCol], type: exType))
+        }
+    }
+
+    private func parseRoutes() throws {
+        let url = Self.cacheDir.appendingPathComponent("routes.txt")
+        let content = try String(contentsOf: url, encoding: .utf8)
+        let (headers, rows) = splitCSV(content)
+
+        guard let idCol = headers.firstIndex(of: "route_id"),
+            let nameCol = headers.firstIndex(of: "route_long_name")
+        else { throw GTFSError.missingColumns("routes.txt") }
+
+        var result: [(id: String, name: String)] = []
+        for row in rows {
+            guard row.count > max(idCol, nameCol) else { continue }
+            let id = row[idCol]
+            guard !id.isEmpty else { continue }
+            result.append((id: id, name: row[nameCol]))
+        }
+        parsedRoutes = result.sorted { $0.name < $1.name }
+    }
+
+    private func parseStops() throws {
+        let url = Self.cacheDir.appendingPathComponent("stops.txt")
+        let content = try String(contentsOf: url, encoding: .utf8)
+        let (headers, rows) = splitCSV(content)
+
+        guard let idCol = headers.firstIndex(of: "stop_id"),
+            let nameCol = headers.firstIndex(of: "stop_name")
+        else { throw GTFSError.missingColumns("stops.txt") }
+
+        for row in rows {
+            guard row.count > max(idCol, nameCol) else { continue }
+            let id = row[idCol]
+            guard !id.isEmpty else { continue }
+            stops[id] = row[nameCol]
         }
     }
 
@@ -252,8 +332,8 @@ final class GTFSScheduleService {
 
         let headers = csvSplitLine(lines[0].trimmingCharacters(in: .whitespacesAndNewlines))
         guard let tripCol = headers.firstIndex(of: "trip_id"),
-              let stopCol = headers.firstIndex(of: "stop_id"),
-              let depCol = headers.firstIndex(of: "departure_time")
+            let stopCol = headers.firstIndex(of: "stop_id"),
+            let depCol = headers.firstIndex(of: "departure_time")
         else { throw GTFSError.missingColumns("stop_times.txt") }
 
         let maxNeeded = max(tripCol, stopCol, depCol)
@@ -265,26 +345,30 @@ final class GTFSScheduleService {
             guard row.count > maxNeeded else { continue }
             let tripId = row[tripCol]
             // Only store stop times for trips we know about (filters non-relevant lines)
-            guard !tripId.isEmpty, trips[tripId] != nil else { continue }
-            stopTimes[tripId, default: []].append((stopId: row[stopCol], departureTime: row[depCol]))
+            guard !tripId.isEmpty, let trip = trips[tripId] else { continue }
+            let stopId = row[stopCol]
+            stopTimes[tripId, default: []].append((stopId: stopId, departureTime: row[depCol]))
+            // Build line→stops index for the settings station picker
+            lineStops[trip.routeId, default: []].insert(stopId)
         }
     }
 
     // MARK: - Computing Departures
 
-    private func computeDepartures(config: RouteConfig) -> [TrainDeparture] {
+    private func computeDepartures(lineId: String, stopId: String, destinationStopId: String?, directionId: Int, maxTrains: Int)
+        -> [TrainDeparture]
+    {
         let now = Date()
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = TimeZone(identifier: "America/Chicago") ?? .current
+        let cal = Calendar.central  // always Central — safe when laptop TZ changes
 
         let df = DateFormatter()
         df.dateFormat = "yyyyMMdd"
-        df.timeZone = cal.timeZone
+        df.timeZone = .centralTime
         let todayStr = df.string(from: now)
 
         let tf = DateFormatter()
         tf.dateFormat = "HH:mm:ss"
-        tf.timeZone = cal.timeZone
+        tf.timeZone = .centralTime
         let nowTimeStr = tf.string(from: now)
 
         let weekday = cal.component(.weekday, from: now)  // 1=Sun … 7=Sat
@@ -309,8 +393,11 @@ final class GTFSScheduleService {
         // Apply calendar_dates exceptions
         for (sid, exceptions) in calendarExceptions {
             for exc in exceptions where exc.date == todayStr {
-                if exc.type == 1 { activeServices.insert(sid) }
-                else if exc.type == 2 { activeServices.remove(sid) }
+                if exc.type == 1 {
+                    activeServices.insert(sid)
+                } else if exc.type == 2 {
+                    activeServices.remove(sid)
+                }
             }
         }
 
@@ -318,13 +405,23 @@ final class GTFSScheduleService {
         var departures: [TrainDeparture] = []
 
         for (tripId, trip) in trips {
-            guard trip.routeId == config.lineId else { continue }
-            guard trip.directionId == config.directionId else { continue }
+            guard trip.routeId == lineId else { continue }
+            // When destination is set, direction is implied by stop order; skip directionId filter
+            if destinationStopId == nil {
+                guard trip.directionId == directionId else { continue }
+            }
             guard activeServices.contains(trip.serviceId) else { continue }
 
             guard let entries = stopTimes[tripId],
-                  let entry = entries.first(where: { $0.stopId == config.stopId })
+                let depIdx = entries.firstIndex(where: { $0.stopId == stopId })
             else { continue }
+            let entry = entries[depIdx]
+
+            // If a destination stop is configured, require it appears after the departure stop
+            if let destId = destinationStopId {
+                guard let destIdx = entries.firstIndex(where: { $0.stopId == destId }),
+                    destIdx > depIdx else { continue }
+            }
 
             let depTimeStr = entry.departureTime
             // Simple string compare works for zero-padded HH:MM:SS (handles up to 23:59:59)
@@ -334,26 +431,32 @@ final class GTFSScheduleService {
             else { continue }
 
             let minutesUntil = max(0, Int(depDate.timeIntervalSince(now) / 60))
-            departures.append(TrainDeparture(
-                id: tripId,
-                tripId: tripId,
-                scheduledTime: depDate,
-                delaySeconds: 0,
-                minutesUntil: minutesUntil
-            ))
+            departures.append(
+                TrainDeparture(
+                    id: tripId,
+                    tripId: tripId,
+                    scheduledTime: depDate,
+                    delaySeconds: 0,
+                    minutesUntil: minutesUntil,
+                    isRealTime: false
+                ))
         }
 
-        return departures
+        return
+            departures
             .sorted { $0.scheduledTime < $1.scheduledTime }
-            .prefix(config.maxTrains)
+            .prefix(maxTrains)
             .map { $0 }
     }
 
     /// Converts a GTFS "HH:MM:SS" time (may exceed 24h for overnight service) to a Date.
-    private func parseGTFSTime(_ timeStr: String, referenceDate: Date, calendar: Calendar) -> Date? {
+    private func parseGTFSTime(_ timeStr: String, referenceDate: Date, calendar: Calendar) -> Date?
+    {
         let parts = timeStr.split(separator: ":").compactMap { Int($0) }
         guard parts.count == 3 else { return nil }
-        let h = parts[0], m = parts[1], s = parts[2]
+        let h = parts[0]
+        let m = parts[1]
+        let s = parts[2]
 
         var comps = calendar.dateComponents([.year, .month, .day], from: referenceDate)
         comps.hour = h % 24

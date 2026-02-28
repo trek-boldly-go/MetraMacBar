@@ -13,6 +13,7 @@ package: build
 	mkdir -p $(APP)/Contents/Resources
 	cp $(BINARY) $(APP)/Contents/MacOS/
 	cp Resources/Info.plist $(APP)/Contents/
+	cp Resources/AppIcon.icns $(APP)/Contents/Resources/
 	codesign --sign - --force --deep $(APP)
 	@echo "Built $(APP)"
 
