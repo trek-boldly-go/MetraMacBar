@@ -2,7 +2,7 @@
 
 A lightweight macOS menu bar app that shows upcoming Metra train departures from your station. No dock icon, no window — just a tram icon in your menu bar with the next train's departure time.
 
-Built for BNSF line, Naperville → Chicago (inbound) by default.
+Defaults to BNSF line, Naperville → Chicago, but fully configurable via the built-in Settings panel.
 
 ## Requirements
 
@@ -32,7 +32,7 @@ Your token is stored securely in the macOS Keychain, never on disk or in plain t
 
 ## How It Works
 
-When a token is present, the app polls Metra's GTFS-RT feed every 10 minutes for live departure times including real-time delays. If the feed is unavailable or no token is configured, it automatically falls back to Metra's published static schedule (downloaded and cached locally). The "Scheduled" badge and greyed-out Refresh button indicate static mode.
+When a token is present, the app polls Metra's GTFS-RT binary feed every 10 minutes for live departure times including real-time delays. If the live feed returns fewer trains than your configured limit (e.g. trains that haven't left their origin station yet), the app pads the list with upcoming scheduled departures — live trains are marked with a small signal icon. If the feed is unavailable or no token is configured, it falls back entirely to Metra's published static schedule (downloaded and cached locally). The "Scheduled" badge indicates static mode.
 
 ## Build Commands
 
@@ -53,7 +53,13 @@ xattr -c MetraTracker.app
 
 ## Configuration
 
-Currently hardcoded to BNSF line, Naperville station, inbound (direction 1). To change the default, edit `RouteConfig.default` in [Sources/MetraTracker/Config.swift](Sources/MetraTracker/Config.swift). See [CLAUDE.md](CLAUDE.md) for architecture notes on extending to other lines.
+Click the tram icon → gear icon to open Settings. From there you can:
+
+- **Switch lines** — any Metra line (BNSF, UP-N, MD-W, etc.), populated from the cached GTFS data
+- **Add/edit route slots** — time-windowed routes so the app automatically shows the right direction (e.g. outbound in the morning, inbound in the evening). Slots include departure station, optional destination station (to filter express trains that skip your stop), and direction.
+- **Manage your API token** — stored securely in the macOS Keychain
+
+The ⇄ button in the popover header lets you manually cycle between slots when you're travelling outside your usual schedule.
 
 ## License
 

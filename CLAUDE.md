@@ -26,12 +26,13 @@ driving all live-vs-static UI differences.
 | `Sources/MetraTracker/main.swift` | NSApplication bootstrap |
 | `Sources/MetraTracker/AppDelegate.swift` | `.accessory` policy, Keychain load, tooltip delay |
 | `Sources/MetraTracker/Config.swift` | `RouteConfig` struct + `ConfigStore` (UserDefaults JSON) |
-| `Sources/MetraTracker/Models.swift` | GTFS-RT Codable types, `TrainDeparture`, `AppState` |
+| `Sources/MetraTracker/Models.swift` | `TrainDeparture` (with `isRealTime`), `AppState` |
 | `Sources/MetraTracker/KeychainHelper.swift` | API token CRUD in macOS Keychain |
-| `Sources/MetraTracker/MetraService.swift` | Fetch + parse GTFS-RT JSON feed |
+| `Sources/MetraTracker/GTFSRTParser.swift` | Zero-dependency binary protobuf parser for GTFS-RT |
+| `Sources/MetraTracker/MetraService.swift` | Fetch GTFS-RT binary feed, filter to relevant trains |
 | `Sources/MetraTracker/GTFSScheduleService.swift` | Download, cache, parse static GTFS ZIP |
-| `Sources/MetraTracker/MenuBarController.swift` | Status item, popover, setup panel, refresh loop |
-| `Sources/MetraTracker/Views/SetupView.swift` | API token entry dialog |
+| `Sources/MetraTracker/MenuBarController.swift` | Status item, popover, slot cycling, refresh loop |
+| `Sources/MetraTracker/Views/SetupView.swift` | `SettingsView` (line/token/slots) + `SlotEditorView` |
 | `Sources/MetraTracker/Views/TrainListView.swift` | Popover UI (header, train rows, footer) |
 
 ## Build
@@ -48,7 +49,7 @@ ad-hoc code signing (`codesign --sign -`).
 
 - **Endpoint:** `https://gtfspublic.metrarr.com/gtfs/public/tripupdates`
 - **Auth:** Query param `?api_token=KEY` (NOT Basic Auth — deprecated Nov 2025)
-- **Format:** JSON, snake_case field names; request with `Accept: application/json`
+- **Format:** Binary protobuf (GTFS-RT spec); parsed by `GTFSRTParser.swift` with no external deps
 - **Static GTFS ZIP:** `https://schedules.metrarail.com/gtfs/schedule.zip`
 - **Published timestamp:** `https://schedules.metrarail.com/gtfs/published.txt` (version check)
 
@@ -68,12 +69,15 @@ zero-byte files from failed prior extractions).
 
 ## Configuration
 
-`RouteConfig` (in `Config.swift`) holds `lineId`, `stopId`, `stopName`, `directionId`, `maxTrains`.
+`RouteConfig` (in `Config.swift`) holds `lineId`, `maxTrains`, and `slots: [RouteSlot]`.
 Persisted to UserDefaults as JSON (key: `routeConfig`). Defaults to BNSF, Naperville, inbound (1).
 
-To support additional lines/stops: update `SetupView.swift` to let users pick a line and stop,
-add a lookup table of stop IDs (from GTFS `stops.txt`), and update `RouteConfig.default`.
-Direction convention: `0` = outbound (away from Chicago), `1` = inbound (toward Chicago).
+Each `RouteSlot` has a `startTime`/`endTime` window ("HH:mm" 24h Central), `departureStopId`,
+optional `destinationStopId` (filters express trains that skip the stop), and `directionId`.
+`activeSlot()` picks the current slot by time; users can cycle manually with the ⇄ button.
+
+Everything is configurable from the Settings panel (gear icon) — line, API token, and slots —
+populated from the cached GTFS data. Direction: `0` = outbound, `1` = inbound (toward Chicago).
 
 ## Coding Conventions
 
