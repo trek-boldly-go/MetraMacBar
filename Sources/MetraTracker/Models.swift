@@ -1,6 +1,34 @@
 import Combine
 import Foundation
 
+// MARK: - Cached DateFormatters
+
+enum DateFormatters {
+    /// 12-hour time with AM/PM for departure display (e.g., "7:45 AM")
+    static let departureTime: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "h:mm a"
+        f.timeZone = .centralTime
+        return f
+    }()
+    
+    /// YYYYMMDD for GTFS date comparisons
+    static let gtfsDate: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd"
+        f.timeZone = .centralTime
+        return f
+    }()
+    
+    /// HH:mm:ss for GTFS time comparisons
+    static let gtfsTime: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        f.timeZone = .centralTime
+        return f
+    }()
+}
+
 // MARK: - Domain Model
 
 struct TrainDeparture: Identifiable {
@@ -8,18 +36,18 @@ struct TrainDeparture: Identifiable {
     let tripId: String
     let scheduledTime: Date
     let delaySeconds: Int
-    let minutesUntil: Int
     let isRealTime: Bool
 
     var effectiveTime: Date {
         scheduledTime.addingTimeInterval(TimeInterval(delaySeconds))
     }
 
+    var minutesUntil: Int {
+        max(0, Int(effectiveTime.timeIntervalSince(Date()) / 60))
+    }
+
     var formattedDepartureTime: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "h:mm a"
-        formatter.timeZone = .centralTime  // always display in Central regardless of laptop TZ
-        return formatter.string(from: effectiveTime)
+        DateFormatters.departureTime.string(from: effectiveTime)
     }
 
     var formattedMinutesUntil: String {

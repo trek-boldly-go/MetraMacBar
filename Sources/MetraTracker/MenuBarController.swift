@@ -100,6 +100,10 @@ final class MenuBarController: NSObject, NSWindowDelegate {
 
     func showSettings() {
         closePopover()
+        
+        // Pause refresh timer while settings is open
+        refreshTimer?.invalidate()
+        refreshTimer = nil
 
         // If already open, just bring it forward
         if let existing = settingsPanel {
@@ -141,6 +145,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         settingsPanel = nil
         NSApp.setActivationPolicy(.accessory)
+        startRefreshing()
     }
 
     // MARK: - Slot Cycling
@@ -174,17 +179,24 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     }
 
     @objc func refresh() {
+        // Capture state snapshot atomically at start to avoid race conditions
         let config = appState.config
+        let currentOverride = appState.overrideSlotId
+        let lastAuto = appState.lastAutoSlotId
+        let autoSlot = config.activeSlot()
 
         // Detect time-based slot change → clear manual override so auto-switch takes effect
-        let autoSlot = config.activeSlot()
-        if autoSlot?.id != appState.lastAutoSlotId {
+        let effectiveSlot: RouteSlot?
+        if autoSlot?.id != lastAuto {
             appState.lastAutoSlotId = autoSlot?.id
             appState.overrideSlotId = nil
+            effectiveSlot = autoSlot
+        } else {
+            effectiveSlot = config.slots.first(where: { $0.id == currentOverride }) ?? autoSlot
         }
 
         // Resolve the effective slot (manual override or time-based)
-        guard let slot = config.slots.first(where: { $0.id == appState.overrideSlotId }) ?? autoSlot else {
+        guard let slot = effectiveSlot else {
             appState.departures = []
             appState.errorMessage = "No route slots configured. Open Settings to add one."
             return
@@ -257,8 +269,10 @@ final class MenuBarController: NSObject, NSWindowDelegate {
                 // Populate GTFS metadata for settings UI (best-effort, background)
                 populateGTFSMetadata(lineId: config.lineId)
             } catch {
+                // Clear stale departures on error to avoid showing outdated times
+                appState.departures = []
                 appState.errorMessage = error.localizedDescription
-                updateMenuBarTitle(departures: appState.departures)
+                updateMenuBarTitle(departures: [])
             }
         }
     }

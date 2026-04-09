@@ -92,7 +92,6 @@ final class MetraService {
             // Skip trains already departed (with a small buffer)
             guard effectiveTime > now.addingTimeInterval(-60) else { continue }
 
-            let minutesUntil = max(0, Int(effectiveTime.timeIntervalSince(now) / 60))
             let tripId = trip.tripId ?? entity.id
 
             departures.append(TrainDeparture(
@@ -100,7 +99,6 @@ final class MetraService {
                 tripId: tripId,
                 scheduledTime: scheduledTime,
                 delaySeconds: delaySeconds,
-                minutesUntil: minutesUntil,
                 isRealTime: true
             ))
         }

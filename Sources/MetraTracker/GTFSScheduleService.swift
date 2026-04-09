@@ -107,9 +107,21 @@ final class GTFSScheduleService {
 
     private func ensureLoaded() async throws {
         if isLoaded { return }
-        try await updateCacheIfNeeded()
-        try parseFiles()
-        isLoaded = true
+        do {
+            try await updateCacheIfNeeded()
+            try parseFiles()
+            isLoaded = true
+        } catch {
+            // If parsing failed, the cache may be corrupt — clear it so next load re-downloads
+            clearCache()
+            throw error
+        }
+    }
+    
+    /// Clears the GTFS cache directory to recover from corruption
+    private func clearCache() {
+        try? FileManager.default.removeItem(at: Self.cacheDir)
+        try? FileManager.default.createDirectory(at: Self.cacheDir, withIntermediateDirectories: true)
     }
 
     private static let neededFiles = [
@@ -361,15 +373,8 @@ final class GTFSScheduleService {
         let now = Date()
         let cal = Calendar.central  // always Central — safe when laptop TZ changes
 
-        let df = DateFormatter()
-        df.dateFormat = "yyyyMMdd"
-        df.timeZone = .centralTime
-        let todayStr = df.string(from: now)
-
-        let tf = DateFormatter()
-        tf.dateFormat = "HH:mm:ss"
-        tf.timeZone = .centralTime
-        let nowTimeStr = tf.string(from: now)
+        let todayStr = DateFormatters.gtfsDate.string(from: now)
+        let nowTimeStr = DateFormatters.gtfsTime.string(from: now)
 
         let weekday = cal.component(.weekday, from: now)  // 1=Sun … 7=Sat
 
@@ -430,14 +435,12 @@ final class GTFSScheduleService {
             guard let depDate = parseGTFSTime(depTimeStr, referenceDate: now, calendar: cal)
             else { continue }
 
-            let minutesUntil = max(0, Int(depDate.timeIntervalSince(now) / 60))
             departures.append(
                 TrainDeparture(
                     id: tripId,
                     tripId: tripId,
                     scheduledTime: depDate,
                     delaySeconds: 0,
-                    minutesUntil: minutesUntil,
                     isRealTime: false
                 ))
         }

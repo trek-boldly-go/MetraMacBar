@@ -167,7 +167,7 @@ struct SettingsView: View {
                     .padding(.vertical, 4)
             } else {
                 VStack(spacing: 6) {
-                    ForEach(config.slots) { slot in
+                    ForEach(config.slots.sorted { $0.startTime < $1.startTime }) { slot in
                         SlotRowView(slot: slot) {
                             editingSlot = slot
                         } onDelete: {
@@ -232,14 +232,17 @@ private struct SlotRowView: View {
         "\(formatHHmm(slot.startTime)) – \(formatHHmm(slot.endTime))"
     }
 
-    private var directionLabel: String {
-        slot.directionId == 0 ? "Outbound" : "Inbound"
+    /// Direction label - only shown when no destination is set (direction is explicit)
+    private var directionLabel: String? {
+        // When destination is set, direction is implicit from stop order, so hide the label
+        guard slot.destinationStopId == nil else { return nil }
+        return slot.directionId == 0 ? "Outbound" : "Inbound"
     }
 
     private var stopsLabel: String {
         var label = slot.departureStopName
         if let dest = slot.destinationStopName { label += " → \(dest)" }
-        label += " · \(directionLabel)"
+        if let dir = directionLabel { label += " · \(dir)" }
         return label
     }
 
